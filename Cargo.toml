@@ -1,0 +1,21 @@
+[package]
+name = "titan_db"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+parking_lot = "0.12"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+log = "0.4"
+env_logger = "0.10"
+crc32fast = "1.3"
+memmap2 = "0.5"
+bytes = "1.4"
+sqlparser = "0.43" # For SQL parsing
+prettytable-rs = "0.10" # For nice CLI output in demo
+tokio = { version = "1.28", features = ["full"] }
+warp = "0.3"
+futures = "0.3"
+serde_json = "1.0"
