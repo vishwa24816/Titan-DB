@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Titan-DB
 
 Titan-DB is a high-concurrency, PostgreSQL-compatible embedded database engine written from scratch in Rust. It is designed to leverage modern multi-core architectures while maintaining the simplicity and portability of a library-based database like SQLite.
@@ -73,3 +74,6 @@ ALTER TABLE users ADD COLUMN email TEXT;
 ## License
 
 MIT
+=======
+# Titan-DB
+>>>>>>> 6d6c2afb95284c84517fb122a5c87c5aed4e7660
