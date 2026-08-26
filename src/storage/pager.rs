@@ -56,26 +56,13 @@ impl Pager {
         }
         drop(shard_lock);
 
-        // Cache miss
         let mut file = self.file.lock().map_err(|_| TitanError::LockError)?;
         file.seek(SeekFrom::Start(page_id * PAGE_SIZE as u64))?;
         
         let mut buffer = vec![0u8; PAGE_SIZE];
-        // Handle EOF for new pages gracefully or strict read
-        if let Err(_) = file.read_exact(&mut buffer) {
-             // For simplicity, we might assume if it fails it's a new page request logic elsewhere
-             // But here strict fetch implies existence.
-             // If we are creating a NEW page, fetch_page shouldn't be called, allocate_page should.
-             return Err(TitanError::PageNotFound(page_id));
-        }
+        file.read_exact(&mut buffer)?;
 
-        let page = Page::deserialize(&buffer).unwrap_or_else(|_| {
-            // If deserialization fails (empty file/init), return a fresh page if strictly needed
-            // But realistically, we should panic or error. 
-            // For PoC:
-             Page::new(page_id, crate::storage::page::PageType::Leaf)
-        });
-
+        let page = Page::deserialize(&buffer)?;
         let page_arc = Arc::new(RwLock::new(page));
 
         let mut shard_write = self.get_shard(page_id).write();
@@ -94,18 +81,19 @@ impl Pager {
 
         let mut shard_write = self.get_shard(page_id).write();
         shard_write.pages.insert(page_id, page_arc.clone());
+        drop(shard_write);
 
+        self.flush_page(page_id)?;
         Ok(page_arc)
     }
 
     pub fn flush_page(&self, page_id: PageId) -> Result<()> {
         let shard_read = self.get_shard(page_id).read();
         let page_lock = shard_read.pages.get(&page_id).ok_or(TitanError::PageNotFound(page_id))?;
-        let page = page_lock.read();
+        let mut page = page_lock.write();
 
         if page.dirty {
             let data = page.serialize()?;
-            // Ensure padding to PAGE_SIZE
             let mut final_data = data;
             if final_data.len() < PAGE_SIZE {
                 final_data.resize(PAGE_SIZE, 0);
@@ -114,6 +102,8 @@ impl Pager {
             let mut file = self.file.lock().map_err(|_| TitanError::LockError)?;
             file.seek(SeekFrom::Start(page_id * PAGE_SIZE as u64))?;
             file.write_all(&final_data)?;
+            file.flush()?;
+            page.dirty = false;
         }
         Ok(())
     }

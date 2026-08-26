@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::storage::page::{PageId, PageType};
 use crate::storage::pager::Pager;
-use crate::error::{Result, TitanError};
+use crate::error::Result;
 
 pub struct BLinkTree {
     pager: Arc<Pager>,
@@ -19,6 +19,10 @@ impl BLinkTree {
         })
     }
 
+    pub fn root_page_id(&self) -> PageId {
+        *self.root.lock().unwrap()
+    }
+
     /// Finds the leaf page that *should* contain the key.
     /// Handles concurrent splits via B-link logic.
     fn find_leaf(&self, key: &[u8]) -> Result<PageId> {
@@ -30,7 +34,7 @@ impl BLinkTree {
 
             // 1. Move Right Logic (The B-link magic)
             if let Some(ref high_key) = page.header.high_key {
-                if key > high_key {
+                if key > high_key.as_slice() {
                     let next_id = page.header.right_link.expect("High key exists but no right link");
                     current_id = next_id;
                     continue; // Re-fetch new node, release lock on old
@@ -66,62 +70,106 @@ impl BLinkTree {
         Ok(current_id) 
     }
 
-    pub fn search(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub fn search(&self, key: &[u8], tx_read_ts: u64) -> Result<Option<Vec<u8>>> {
         let leaf_id = self.find_leaf(key)?;
         let page_arc = self.pager.fetch_page(leaf_id)?;
         let page = page_arc.read();
 
-        // Re-check high key just in case split happened between find_leaf and read lock?
-        // In B-link, we usually hold the lock or re-check. 
-        // find_leaf returns a page_id. We fetch it again. It might have split.
-        // So we need a loop here too or find_leaf should return the locked page.
-        // For simplicity:
-        
-        // Linear scan keys
-        // binary_search expects &T. Since Vec contains Vec<u8>, we need to compare with &Vec<u8>.
-        // We can use binary_search_by to avoid allocation.
-        if let Ok(idx) = page.content.keys.binary_search_by(|k| k.as_slice().cmp(key)) {
-             Ok(Some(page.content.values[idx].clone()))
-        } else {
-             Ok(None)
+        // Scan MVCC records matching key visible to tx_read_ts
+        for rec in page.content.records.iter().rev() {
+            if rec.key.as_slice() == key {
+                if rec.tx_created <= tx_read_ts {
+                    if let Some(exp) = rec.tx_expired {
+                        if exp <= tx_read_ts {
+                            return Ok(None); // Deleted before our read snapshot
+                        }
+                    }
+                    return Ok(Some(rec.data.clone()));
+                }
+            }
         }
+        Ok(None)
     }
 
-    pub fn insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
-        // 1. Find leaf
+    pub fn insert(&self, key: Vec<u8>, value: Vec<u8>, tx_id: u64) -> Result<()> {
         let leaf_id = self.find_leaf(&key)?;
-        
-        // 2. Lock leaf for writing
         let page_arc = self.pager.fetch_page(leaf_id)?;
         let mut page = page_arc.write();
 
-        // 3. Move Right Check (Writer specific)
-        // If split happened, we might need to move right even with write lock?
-        // Yes, if we locked the wrong node.
-        if let Some(ref high_key) = page.header.high_key {
-            if &key > high_key {
-                // Release lock, traverse right (simplified recursion/loop needed)
-                // For PoC, we just error or panic, but real impl loops.
-                return Err(TitanError::PageNotFound(0)); // "Retry" error
+        // Expire only the most recent active version of this key
+        for rec in page.content.records.iter_mut().rev() {
+            if rec.key == key && rec.tx_expired.is_none() {
+                rec.tx_expired = Some(tx_id);
+                break;
             }
         }
 
-        // 4. Insert locally
-        // Check space... simplified
-        page.content.keys.push(key);
-        page.content.values.push(value);
-        // Sort
-        // (Inefficient: sorting every insert)
-        // page.content.keys.sort(); // syncing values would be hard.
-        // Use a proper structure in PageContent for real impl.
+        page.content.records.push(crate::storage::page::MvccRecord {
+            tx_created: tx_id,
+            tx_expired: None,
+            key,
+            data: value,
+        });
 
         page.dirty = true;
-        
-        // 5. Split if full
-        // if page.size() > PAGE_SIZE {
-        //    self.split_leaf(&mut page)?;
-        // }
-
+        drop(page);
+        self.pager.flush_page(leaf_id)?;
         Ok(())
+    }
+
+    pub fn delete(&self, key: &[u8], tx_id: u64) -> Result<bool> {
+        let leaf_id = self.find_leaf(key)?;
+        let page_arc = self.pager.fetch_page(leaf_id)?;
+        let mut page = page_arc.write();
+
+        let mut found = false;
+        // Expire the active version
+        for rec in page.content.records.iter_mut().rev() {
+            if rec.key.as_slice() == key && rec.tx_expired.is_none() {
+                rec.tx_expired = Some(tx_id);
+                found = true;
+                break;
+            }
+        }
+
+        if found {
+            page.dirty = true;
+            drop(page);
+            self.pager.flush_page(leaf_id)?;
+        }
+        Ok(found)
+    }
+
+    pub fn scan_all(&self, tx_read_ts: u64) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let leaf_id = *self.root.lock().unwrap();
+        let page_arc = self.pager.fetch_page(leaf_id)?;
+        let page = page_arc.read();
+
+        // Group by key and pick the visible version at tx_read_ts
+        let mut map: std::collections::HashMap<Vec<u8>, Option<Vec<u8>>> = std::collections::HashMap::new();
+        for rec in &page.content.records {
+            if rec.tx_created <= tx_read_ts {
+                let is_alive = match rec.tx_expired {
+                    Some(exp) => exp > tx_read_ts,
+                    None => true,
+                };
+                if is_alive {
+                    map.insert(rec.key.clone(), Some(rec.data.clone()));
+                } else {
+                    // Deleted or superseded at or before tx_read_ts
+                    if let Some(entry) = map.get_mut(&rec.key) {
+                        *entry = None;
+                    }
+                }
+            }
+        }
+
+        let mut results = Vec::new();
+        for (k, v_opt) in map {
+            if let Some(v) = v_opt {
+                results.push((k, v));
+            }
+        }
+        Ok(results)
     }
 }

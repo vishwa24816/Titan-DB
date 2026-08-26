@@ -1,6 +1,8 @@
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::storage::page::PageId;
+use crate::index::blink::BLinkTree;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DataType {
@@ -16,11 +18,11 @@ pub struct ColumnDef {
     pub nullable: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableSchema {
     pub name: String,
     pub columns: Vec<ColumnDef>,
-    pub root_page_id: PageId, // B-Link Tree root for this table
+    pub root_page_id: PageId,
+    pub tree: Arc<BLinkTree>,
 }
 
 pub struct Catalog {

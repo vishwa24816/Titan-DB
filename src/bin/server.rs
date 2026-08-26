@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use warp::Filter;
 use parking_lot::RwLock;
 
@@ -14,11 +13,6 @@ async fn main() {
     let pager = Arc::new(Pager::open("titan_web.db").expect("Failed to open DB"));
     let catalog = Arc::new(RwLock::new(Catalog::new()));
     let executor = Arc::new(Executor::new(pager, catalog));
-    
-    // Allow sharing executor across threads/tasks
-    // Executor uses Arc internally for pager/catalog, so it's cheap to clone if it implemented Clone
-    // But Executor struct itself doesn't derive Clone. Let's wrap it.
-    let executor = Arc::new(Mutex::new(executor));
 
     println!("TitanDB Server starting on 127.0.0.1:3030");
 
@@ -39,7 +33,7 @@ async fn main() {
     warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
 }
 
-async fn handle_ws(mut ws: warp::ws::WebSocket, executor: Arc<Mutex<Arc<Executor>>>) {
+async fn handle_ws(mut ws: warp::ws::WebSocket, executor: Arc<Executor>) {
     use futures::{StreamExt, SinkExt};
 
     while let Some(result) = ws.next().await {
@@ -55,12 +49,9 @@ async fn handle_ws(mut ws: warp::ws::WebSocket, executor: Arc<Mutex<Arc<Executor
             println!("Received query: {}", text);
             
             // Execute query
-            let response_json = {
-                let exec_lock = executor.lock().await;
-                match exec_lock.execute(text) {
-                    Ok(res) => serde_json::to_string(&res).unwrap(),
-                    Err(e) => serde_json::to_string(&ExecutionResult::Message(format!("Error: {}", e))).unwrap(),
-                }
+            let response_json = match executor.execute(text) {
+                Ok(res) => serde_json::to_string(&res).unwrap(),
+                Err(e) => serde_json::to_string(&ExecutionResult::Message(format!("Error: {}", e))).unwrap(),
             };
 
             if let Err(e) = ws.send(warp::ws::Message::text(response_json)).await {

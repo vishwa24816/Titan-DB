@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use crate::error::Result;
 
-pub const PAGE_SIZE: usize = 4096;
+pub const PAGE_SIZE: usize = 65536;
 
 pub type PageId = u64;
 
@@ -10,6 +10,14 @@ pub enum PageType {
     Leaf,
     Interior,
     Overflow,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MvccRecord {
+    pub tx_created: u64,
+    pub tx_expired: Option<u64>, // Some(tx_id) if deleted/updated
+    pub key: Vec<u8>,
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,8 +31,13 @@ pub struct PageHeader {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeContent {
-    pub keys: Vec<Vec<u8>>,
-    pub values: Vec<Vec<u8>>, // If leaf, actual values. If interior, PageIds (serialized).
+    pub records: Vec<MvccRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PageData {
+    pub header: PageHeader,
+    pub content: NodeContent,
 }
 
 #[derive(Debug, Clone)]
@@ -45,28 +58,29 @@ impl Page {
                 right_link: None,
             },
             content: NodeContent {
-                keys: Vec::new(),
-                values: Vec::new(),
+                records: Vec::new(),
             },
             dirty: true,
         }
     }
 
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        let mut buffer = Vec::with_capacity(PAGE_SIZE);
-        bincode::serialize_into(&mut buffer, &self.header)?;
-        bincode::serialize_into(&mut buffer, &self.content)?;
-        // Pad or truncate to ensure size fits - simplified here
-        Ok(buffer)
+        let page_data = PageData {
+            header: self.header.clone(),
+            content: self.content.clone(),
+        };
+        let mut encoded = bincode::serialize(&page_data)?;
+        if encoded.len() < PAGE_SIZE {
+            encoded.resize(PAGE_SIZE, 0);
+        }
+        Ok(encoded)
     }
 
     pub fn deserialize(bytes: &[u8]) -> Result<Self> {
-        let mut cursor = std::io::Cursor::new(bytes);
-        let header: PageHeader = bincode::deserialize_from(&mut cursor)?;
-        let content: NodeContent = bincode::deserialize_from(&mut cursor)?;
+        let page_data: PageData = bincode::deserialize(bytes)?;
         Ok(Page {
-            header,
-            content,
+            header: page_data.header,
+            content: page_data.content,
             dirty: false,
         })
     }
