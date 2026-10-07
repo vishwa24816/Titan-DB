@@ -1,4 +1,6 @@
+pub mod encoding;
 pub mod executor;
+pub mod functions;
 
 use serde::{Serialize, Deserialize};
 
