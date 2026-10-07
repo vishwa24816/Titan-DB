@@ -143,6 +143,11 @@
         <div class="toolbar">
             <button onclick="runQuery()">▶ Execute (F5)</button>
             <button onclick="clearQuery()">Clear</button>
+            <span style="margin-left:1rem;font-size:0.85rem;color:#666">Tx:</span>
+            <button onclick="txOp('begin')">Begin</button>
+            <button onclick="txOp('commit')">Commit</button>
+            <button onclick="txOp('rollback')">Rollback</button>
+            <span id="txState" style="font-size:0.85rem;color:#666">no tx</span>
         </div>
         <textarea id="queryInput" class="query-editor" placeholder="-- Enter SQL query here...&#10;SELECT * FROM users;"></textarea>
         <div id="results" class="results-pane">
@@ -155,6 +160,17 @@
         const ws = new WebSocket(`ws://${location.host}/ws`);
         const statusDiv = document.getElementById('status');
         const resultsDiv = document.getElementById('results');
+        const sessionId = 'sess-' + Math.random().toString(36).slice(2, 10);
+        let activeTx = null;
+
+        function sendTx(op, sql) {
+            ws.send(JSON.stringify({ session: sessionId, op, sql }));
+        }
+
+        function txOp(op) {
+            statusDiv.textContent = 'Tx ' + op + '...';
+            sendTx(op, undefined);
+        }
 
         ws.onopen = () => {
             statusDiv.textContent = 'Connected to TitanDB Server';
@@ -167,15 +183,25 @@
 
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
-            renderResult(data);
+            if (data.status === 'error') {
+                statusDiv.textContent = 'Error [' + (data.code || '?') + ']';
+                resultsDiv.innerHTML = `<pre>${data.error || 'error'}</pre>`;
+                return;
+            }
+            if (data.tx_id) { activeTx = data.tx_id; }
+            if (data.status === 'committed' || data.status === 'rolled-back') { activeTx = null; }
+            const txEl = document.getElementById('txState');
+            if (txEl) txEl.textContent = activeTx ? ('tx ' + activeTx) : 'no tx';
+            if (data.result) renderResult(data.result);
+            else statusDiv.textContent = 'Tx: ' + data.status;
         };
 
         function runQuery() {
             const sql = document.getElementById('queryInput').value;
             if (!sql.trim()) return;
-            
+
             statusDiv.textContent = 'Executing...';
-            ws.send(sql);
+            sendTx(activeTx ? 'stmt' : 'stmt', sql);
         }
 
         function clearQuery() {

@@ -214,3 +214,54 @@ impl Pager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pager_fresh_db_opens_cleanly() {
+        // fresh DB opens cleanly — no UnexpectedEof // cfg(test) unwrap allowed
+        let dir = std::env::temp_dir().join(format!("titan_fresh_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&dir);
+        let pager = Pager::open(&dir).unwrap();
+        let page = pager.fetch_page(0).unwrap();
+        assert_eq!(page.read().header.page_id, 0);
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn pager_oversize_payload_rejected() {
+        // oversize insert errors instead of corrupting neighbors // cfg(test) unwrap allowed
+        let big = vec![0u8; PAGE_SIZE];
+        let err = Pager::check_payload_fits(big.len()).unwrap_err();
+        assert!(matches!(err, TitanError::RowTooLarge(_)));
+    }
+
+    #[test]
+    fn pager_oversize_flush_rejected() {
+        // flush of an over-full page returns RowTooLarge // cfg(test) unwrap allowed
+        let dir = std::env::temp_dir().join(format!("titan_big_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&dir);
+        let pager = Pager::open(&dir).unwrap();
+        let arc = pager
+            .allocate_page(crate::storage::page::PageType::Leaf)
+            .unwrap();
+        {
+            let mut page = arc.write();
+            // Stuff enough records that bincode exceeds PAGE_SIZE
+            for i in 0..5000u32 {
+                page.content.records.push(crate::storage::page::MvccRecord {
+                    tx_created: i as u64,
+                    tx_expired: None,
+                    key: vec![i as u8; 64],
+                    data: vec![i as u8; 256],
+                });
+            }
+            page.dirty = true;
+        }
+        let err = pager.flush_page(arc.read().header.page_id).unwrap_err();
+        assert!(matches!(err, TitanError::RowTooLarge(_)));
+        let _ = std::fs::remove_file(&dir);
+    }
+}

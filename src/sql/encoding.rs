@@ -183,3 +183,58 @@ pub fn parse_literal(lit: &str, dtype: &DataType) -> SqlValue {
         DataType::Bytes => SqlValue::Bytes(lit.as_bytes().to_vec()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schema() -> Vec<DataType> {
+        vec![
+            DataType::Integer,
+            DataType::Float,
+            DataType::Boolean,
+            DataType::Text,
+            DataType::Bytes,
+            DataType::Text,
+        ]
+    }
+
+    #[test]
+    fn encoding_roundtrip_all_types_and_nulls() {
+        let row = vec![
+            SqlValue::Int64(-42),
+            SqlValue::Float64(3.5),
+            SqlValue::Bool(true),
+            SqlValue::Text("a|||b\x00c".to_string()),
+            SqlValue::Bytes(vec![0, 124, 124, 124, 255]),
+            SqlValue::Null,
+        ];
+        let bytes = encode_row(&row);
+        // Length-prefixing means embedded `|||` payload bytes decode
+        // unambiguously (no delimiter scanning at all).
+        let back = decode_row(&bytes, &schema()).expect("decode");
+        assert_eq!(back, row);
+    }
+
+    #[test]
+    fn encoding_pipe_text_roundtrips() {
+        let row = vec![SqlValue::Text("|||".to_string())];
+        let bytes = encode_row(&row);
+        let back = decode_row(&bytes, &[DataType::Text]).expect("decode");
+        assert_eq!(back, row);
+    }
+
+    #[test]
+    fn encoding_malformed_errors_not_panics() {
+        let schema = vec![DataType::Integer];
+        assert!(decode_row(&[], &schema).is_err());
+        assert!(decode_row(&[0, 0], &schema).is_err());
+        assert!(decode_row(&encode_row(&[SqlValue::Int64(1), SqlValue::Int64(2)]), &schema).is_err());
+        let mut bad = encode_row(&[SqlValue::Int64(1)]);
+        bad[4] = 99; // unknown tag
+        assert!(decode_row(&bad, &schema).is_err());
+        let mut trunc = encode_row(&[SqlValue::Text("hello".to_string())]);
+        trunc.truncate(trunc.len() - 2);
+        assert!(decode_row(&trunc, &[DataType::Text]).is_err());
+    }
+}

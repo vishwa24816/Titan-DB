@@ -360,3 +360,44 @@ fn placeholder_parse(payload: &[u8], expect_crc: u32, off: usize) -> Result<LogR
         .map_err(|e| TitanError::WalCorrupt(format!("frame decode failed at {}: {}", off, e)))?;
     Ok(rec)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wal_commit_durable_unit() {
+        let dir = std::env::temp_dir().join(format!("titan_walunit_{}.wal", std::process::id()));
+        let _ = std::fs::remove_file(&dir);
+        let wal = Wal::open(&dir).unwrap();
+        let tx = 42;
+        wal.append(&LogRecord::Put {
+            table: "t".into(),
+            key: b"1".to_vec(),
+            after: b"v".to_vec(),
+            tx,
+        })
+        .unwrap();
+        wal.commit(tx).unwrap();
+        let redo = Wal::replay(&dir).unwrap();
+        assert_eq!(redo.len(), 1);
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn wal_corrupt_frame_unit() {
+        let dir = std::env::temp_dir().join(format!("titan_walcorr_{}.wal", std::process::id()));
+        let _ = std::fs::remove_file(&dir);
+        {
+            let wal = Wal::open(&dir).unwrap();
+            wal.commit(7).unwrap();
+        }
+        let mut bytes = std::fs::read(&dir).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        std::fs::write(&dir, &bytes).unwrap();
+        let err = Wal::replay(&dir).unwrap_err();
+        assert!(matches!(err, TitanError::WalCorrupt(_)));
+        let _ = std::fs::remove_file(&dir);
+    }
+}

@@ -125,3 +125,46 @@ impl Default for TxManager {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tx_first_committer_wins() {
+        let m = TxManager::new();
+        let t1 = m.begin();
+        let t2 = m.begin();
+        m.record_write(t1.tx_id, b"k".to_vec());
+        m.record_write(t2.tx_id, b"k".to_vec());
+        assert!(m.commit(t1).is_ok());
+        assert!(matches!(m.commit(t2), Err(TitanError::TxConflict)));
+    }
+
+    #[test]
+    fn tx_rollback_then_use_is_aborted() {
+        let m = TxManager::new();
+        let t = m.begin();
+        m.record_write(t.tx_id, b"k".to_vec());
+        m.rollback(t);
+        assert!(m.is_aborted(t.tx_id));
+        assert!(matches!(m.commit(t), Err(TitanError::TxAborted)));
+    }
+
+    #[test]
+    fn tx_vacuum_horizon_below_active() {
+        let m = TxManager::new();
+        assert_eq!(m.gc_horizon(), u64::MAX);
+        let t = m.begin();
+        assert_eq!(m.gc_horizon(), t.read_ts);
+    }
+
+    #[test]
+    fn tx_visibility_rule() {
+        assert!(visible(5, None, 5));
+        assert!(visible(5, None, 99));
+        assert!(!visible(6, None, 5));
+        assert!(visible(5, Some(10), 9));
+        assert!(!visible(5, Some(10), 10));
+    }
+}

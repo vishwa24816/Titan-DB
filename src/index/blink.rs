@@ -492,6 +492,8 @@ impl BLinkTree {
         Ok(())
     }
 
+    /// Full leaf-chain scan: follows right_link from the leftmost leaf,
+    /// dedups per key keeping the NEWEST visible version (matches search()).
     /// Maximum timestamp across all raw records (begin + end markers).
     /// Used at open-time recovery to restore the TxManager clock past every
     /// persisted version so reopened snapshots see committed rows.
